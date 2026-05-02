@@ -31,6 +31,7 @@ PURPLE   = (80,  40,  120)
 GOLD     = (255, 200, 0)
 OFFWHITE = (245, 245, 220)
 CYAN     = (0,   200, 220)
+PINK     = (255, 100, 180)
 
 font_big = pygame.font.SysFont("impact", 56)
 font_med = pygame.font.SysFont("impact", 32)
@@ -198,16 +199,24 @@ class Cloud:
 # ── Stage definitions ─────────────────────────────────────────────────────────
 
 STAGES = [
-    {"name": "Legoland Run",     "desc": "Collect 20 coins! Two routes! [SPACE/UP=jump]",      "type": "run",   "souvenir": "Lego Minifig"},
-    {"name": "Memory Waters",    "desc": "Avoid trash, fish & jellyfish! [SPACE/UP=boost up]",  "type": "water", "souvenir": "Pearl Shell"},
-    {"name": "Road of Memories", "desc": "Hold SPACE to accelerate — don't flip or fall!",     "type": "car",   "souvenir": "Photo Frame"},
-    {"name": "Sky of Souvenirs", "desc": "Flap the plane through 15 pipes! [SPACE/UP=flap]",   "type": "fly",   "souvenir": "Golden Wings"},
+    {"name": "Legoland Run",     "desc": "SPACE/UP=jump to top route  |  SHIFT=drop to bottom route",  "type": "run",   "souvenir": "Lego Minifig"},
+    {"name": "Memory Waters",    "desc": "Avoid trash, fish & jellyfish! [SPACE/UP=boost up]",          "type": "water", "souvenir": "Pearl Shell"},
+    {"name": "Road of Memories", "desc": "Hold SPACE to accelerate — don't flip or fall!",             "type": "car",   "souvenir": "Photo Frame"},
+    {"name": "Sky of Souvenirs", "desc": "Flap the plane through 15 pipes! [SPACE/UP=flap]",           "type": "fly",   "souvenir": "Golden Wings"},
 ]
 
-COIN_GOAL = 20
-PIPE_GOAL = 15
-WATER_GOAL = 400
+# Stage 1 coin quotas — must collect this many from EACH route
+TOP_COIN_QUOTA    = 10
+BOTTOM_COIN_QUOTA = 10
+COIN_GOAL         = TOP_COIN_QUOTA + BOTTOM_COIN_QUOTA   # 20 total
+
+PIPE_GOAL  = 15
+WATER_GOAL = 100
 CAR_GOAL   = 2200
+
+# Platform Y positions (feet of player land here)
+PLATFORM_TOP_Y    = 290   # upper platform surface
+PLATFORM_BOTTOM_Y = 370   # lower platform / ground surface
 
 
 # ── Main Game ─────────────────────────────────────────────────────────────────
@@ -220,6 +229,15 @@ class Game:
         self.particles = []
         self.clouds    = [Cloud(random.randint(0, W)) for _ in range(6)]
         self.frame     = 0
+
+        # Load custom plane image (pre-flipped, background removed, sized at 100px wide)
+        import os
+        plane_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plane.png")
+        raw = pygame.image.load(plane_path).convert_alpha()
+        plane_width = 50
+        pw, ph = raw.get_size()
+        self.plane_img = pygame.transform.smoothscale(raw, (plane_width, int(ph * plane_width / pw)))
+
         self.reset_stage()
 
     def reset_stage(self):
@@ -233,9 +251,14 @@ class Game:
         self.pipes_passed    = 0
 
         if t == "run":
-            self.px, self.py = 100, 300
+            self.px, self.py = 100, PLATFORM_BOTTOM_Y - 44
             self.pvy = 0
-            self.on_ground = True
+            self.on_ground  = True
+            self.on_top     = False   # True when standing on upper platform
+            self.drop_timer = 0       # frames remaining where top platform is ignored
+            # Per-route coin quotas
+            self.top_coins_collected    = 0
+            self.bottom_coins_collected = 0
             self._spawn_run_section(0)
 
         elif t == "water":
@@ -257,16 +280,51 @@ class Game:
 
     # ── Stage 1 coin/route spawning ────────────────────────────────────────
     def _spawn_run_section(self, start_x):
+        """
+        Spawn coins alternating on top and bottom routes so both quotas
+        can be filled.  Each section adds coins to whichever route needs
+        more to keep the world balanced.
+        """
         x = start_x + W
-        for _ in range(7):
-            x += random.randint(90, 140)
-            route = random.choice(["top", "bottom"])
-            cy = 255 if route == "top" else 345
-            self.coins.append({"x": x, "y": cy, "collected": False})
+        for _ in range(8):
+            x += random.randint(90, 130)
+
+            # Decide route: bias toward whichever quota is less filled
+            top_pct    = self.top_coins_collected    / TOP_COIN_QUOTA
+            bottom_pct = self.bottom_coins_collected / BOTTOM_COIN_QUOTA
+
+            # Count pending (already spawned but uncollected) coins per route
+            pending_top    = sum(1 for c in self.coins if not c["collected"] and c["route"] == "top")
+            pending_bottom = sum(1 for c in self.coins if not c["collected"] and c["route"] == "bottom")
+
+            # Effective fill = collected + pending
+            eff_top    = (self.top_coins_collected    + pending_top)    / TOP_COIN_QUOTA
+            eff_bottom = (self.bottom_coins_collected + pending_bottom) / BOTTOM_COIN_QUOTA
+
+            if eff_top <= eff_bottom:
+                route = "top"
+            else:
+                route = "bottom"
+
+            cy = PLATFORM_TOP_Y - 20 if route == "top" else PLATFORM_BOTTOM_Y - 20
+
+            self.coins.append({
+                "x":         x,
+                "y":         cy,
+                "route":     route,
+                "collected": False
+            })
+
+            # Obstacles only on the same route, slightly offset
             if random.random() < 0.35:
-                oy = 345 if route == "top" else 268
-                oh = random.randint(28, 46)
-                self.obstacles.append({"x": x+50, "y": oy-oh, "w": 28, "h": oh, "color": BROWN})
+                oy = (PLATFORM_TOP_Y - random.randint(28, 46)) if route == "top" else (PLATFORM_BOTTOM_Y - random.randint(28, 46))
+                self.obstacles.append({
+                    "x":     x + 55,
+                    "y":     oy,
+                    "w":     28,
+                    "h":     random.randint(28, 46),
+                    "color": BROWN
+                })
 
     # ── Events ─────────────────────────────────────────────────────────────
     def handle_event(self, event):
@@ -286,6 +344,15 @@ class Game:
                         self.pvy = -8
                     elif t == "fly":
                         self.pvy = -8
+
+                # SHIFT = drop to lower route
+                if event.key in (pygame.K_LSHIFT, pygame.K_RSHIFT):
+                    if t == "run" and self.on_top:
+                        # Burst downward; suppress upper-platform landing for 25 frames
+                        self.pvy        = 10
+                        self.on_ground  = False
+                        self.on_top     = False
+                        self.drop_timer = 25
 
             elif self.state in ("souvenir", "gameover", "win"):
                 if event.key in (pygame.K_SPACE, pygame.K_RETURN):
@@ -329,47 +396,86 @@ class Game:
         elif t == "car":   self.update_car(keys)
         elif t == "fly":   self.update_fly(keys)
 
-    # ── Stage 1: Geometry Dash collect coins, two routes ──────────────────
+    # ── Stage 1: Two-route runner with per-route coin quotas ──────────────
     def update_run(self, keys):
-        GROUND_TOP    = 290
-        GROUND_BOTTOM = 370
         SPEED = 5
+
+        # Tick drop cooldown
+        if self.drop_timer > 0:
+            self.drop_timer -= 1
 
         self.pvy += 0.6
         self.py  += self.pvy
 
-        if self.py + 44 >= GROUND_BOTTOM:
-            self.py = GROUND_BOTTOM - 44; self.pvy = 0; self.on_ground = True
-        elif self.py + 44 >= GROUND_TOP and self.pvy > 0 and self.py < GROUND_TOP - 4:
-            self.py = GROUND_TOP - 44; self.pvy = 0; self.on_ground = True
+        player_feet = self.py + 44
+        player_rect = pygame.Rect(self.px + 4, self.py + 4, 28, 36)
 
+        # ── Platform collision ────────────────────────────────────────────
+        landed_top    = False
+        landed_bottom = False
+
+        if self.pvy > 0:
+            # Upper platform: land only when drop_timer has expired
+            if (self.drop_timer == 0 and
+                    player_feet >= PLATFORM_TOP_Y and
+                    player_feet <= PLATFORM_TOP_Y + 18):
+                self.py  = PLATFORM_TOP_Y - 44
+                self.pvy = 0
+                self.on_ground = True
+                self.on_top    = True
+                landed_top     = True
+
+            # Bottom platform
+            if (not landed_top and
+                    player_feet >= PLATFORM_BOTTOM_Y):
+                self.py  = PLATFORM_BOTTOM_Y - 44
+                self.pvy = 0
+                self.on_ground = True
+                self.on_top    = False
+                landed_bottom  = True
+
+        # If standing on top platform and walking off the edge: start falling
+        if self.on_top and not landed_top and self.pvy > 0.5:
+            self.on_ground = False
+            self.on_top    = False
+
+        # Fell off screen
         if self.py > H + 60:
             self.trigger_gameover(); return
 
+        # ── Scroll obstacles & coins ──────────────────────────────────────
         for o in self.obstacles: o["x"] -= SPEED
         for coin in self.coins:  coin["x"] -= SPEED
         self.obstacles = [o for o in self.obstacles if o["x"] > -60]
         self.coins     = [c for c in self.coins if c["x"] > -30]
 
+        # Spawn more when world runs thin
         rightmost = max((c["x"] for c in self.coins), default=0)
         if rightmost < W + 200:
             self._spawn_run_section(rightmost - W)
 
-        pr = pygame.Rect(self.px+4, self.py+4, 28, 36)
+        # ── Coin collection ───────────────────────────────────────────────
         for coin in self.coins:
             if not coin["collected"]:
-                cr = pygame.Rect(coin["x"]-10, coin["y"]-10, 20, 20)
-                if pr.colliderect(cr):
+                cr = pygame.Rect(coin["x"] - 10, coin["y"] - 10, 20, 20)
+                if player_rect.colliderect(cr):
                     coin["collected"] = True
                     self.coins_collected += 1
+                    if coin["route"] == "top":
+                        self.top_coins_collected    = min(self.top_coins_collected + 1,    TOP_COIN_QUOTA)
+                    else:
+                        self.bottom_coins_collected = min(self.bottom_coins_collected + 1, BOTTOM_COIN_QUOTA)
                     for _ in range(8):
                         self.particles.append(Particle(coin["x"], coin["y"], GOLD))
 
+        # ── Obstacle collision ────────────────────────────────────────────
         for o in self.obstacles:
-            if pr.colliderect(pygame.Rect(o["x"]+3, o["y"]+3, o["w"]-6, o["h"]-6)):
+            if player_rect.colliderect(pygame.Rect(o["x"] + 3, o["y"] + 3, o["w"] - 6, o["h"] - 6)):
                 self.trigger_gameover(); return
 
-        if self.coins_collected >= COIN_GOAL:
+        # ── Completion: both quotas must be full ──────────────────────────
+        if (self.top_coins_collected    >= TOP_COIN_QUOTA and
+                self.bottom_coins_collected >= BOTTOM_COIN_QUOTA):
             self._stage_complete()
 
     # ── Stage 2: Jetpack joyride underwater — avoid obstacles ─────────────
@@ -527,9 +633,11 @@ class Game:
             pygame.draw.rect(screen, hcol if hover else (60,60,80), rect, border_radius=10)
             pygame.draw.rect(screen, WHITE, rect, 2, border_radius=10)
             draw_text(screen, label, font_med, WHITE, W//2, cy)
-        draw_text(screen, "SPACE / UP to jump, boost, accelerate or flap", font_xs, LTGRAY, W//2, 400)
+        draw_text(screen, "Stage 1: SPACE/UP=jump  |  SHIFT=drop to lower route", font_xs, LTGRAY, W//2, 390)
+        draw_text(screen, "Collect coins on BOTH routes to complete Stage 1!", font_xs, GOLD, W//2, 412)
+        draw_text(screen, "SPACE / UP to boost, accelerate or flap in later stages", font_xs, LTGRAY, W//2, 434)
         if self.collected:
-            draw_text(screen, "Souvenirs: " + "  ★  ".join(self.collected), font_xs, GOLD, W//2, 445)
+            draw_text(screen, "Souvenirs: " + "  ★  ".join(self.collected), font_xs, GOLD, W//2, 458)
 
     # ── Stage router ───────────────────────────────────────────────────────
     def draw_stage(self):
@@ -547,26 +655,38 @@ class Game:
         pygame.draw.circle(screen, YELLOW, (700, 70), 38)
         for c in self.clouds: c.draw(screen)
 
-        # Upper platform
-        pygame.draw.rect(screen, GREEN,   (0, 290, W, 20))
-        pygame.draw.rect(screen, DKGREEN, (0, 290, W, 4))
-        # Lower platform / ground
-        pygame.draw.rect(screen, GREEN,   (0, 370, W, H-370))
-        pygame.draw.rect(screen, DKGREEN, (0, 370, W, 4))
+        # ── Upper platform ────────────────────────────────────────────────
+        # Tinted blue to distinguish it as the "top route"
+        pygame.draw.rect(screen, (60, 160, 60),  (0, PLATFORM_TOP_Y,    W, 20))
+        pygame.draw.rect(screen, DKGREEN,         (0, PLATFORM_TOP_Y,    W, 4))
 
-        # Coins
+        # ── Lower platform / ground ───────────────────────────────────────
+        pygame.draw.rect(screen, GREEN,   (0, PLATFORM_BOTTOM_Y, W, H - PLATFORM_BOTTOM_Y))
+        pygame.draw.rect(screen, DKGREEN, (0, PLATFORM_BOTTOM_Y, W, 4))
+
+        # ── Route labels (faint, on the platforms) ────────────────────────
+        lbl_top = font_xs.render("▲ TOP ROUTE  (SPACE to jump up)", True, (180, 255, 180))
+        screen.blit(lbl_top, (8, PLATFORM_TOP_Y + 5))
+        lbl_bot = font_xs.render("▼ BOTTOM ROUTE  (SHIFT to drop down)", True, (180, 255, 180))
+        screen.blit(lbl_bot, (8, PLATFORM_BOTTOM_Y + 5))
+
+        # ── Coins ─────────────────────────────────────────────────────────
         for coin in self.coins:
             if not coin["collected"]:
                 cx, cy = int(coin["x"]), int(coin["y"])
-                pygame.draw.circle(screen, GOLD,   (cx, cy), 10)
-                pygame.draw.circle(screen, YELLOW, (cx, cy), 7)
-                pygame.draw.circle(screen, WHITE,  (cx-3, cy-3), 3)
-                pygame.draw.circle(screen, BLACK,  (cx, cy), 10, 2)
+                # Top-route coins: gold.  Bottom-route coins: pink-gold tint
+                inner = YELLOW if coin["route"] == "top" else PINK
+                pygame.draw.circle(screen, GOLD,  (cx, cy), 10)
+                pygame.draw.circle(screen, inner, (cx, cy), 7)
+                pygame.draw.circle(screen, WHITE, (cx-3, cy-3), 3)
+                pygame.draw.circle(screen, BLACK, (cx, cy), 10, 2)
 
+        # ── Obstacles ─────────────────────────────────────────────────────
         for o in self.obstacles:
             draw_lego_brick(screen, o["x"], o["y"], o["w"], o["h"], o["color"])
 
-        draw_lego_figure(screen, int(self.px)+18, int(self.py)+44)
+        # ── Player ────────────────────────────────────────────────────────
+        draw_lego_figure(screen, int(self.px) + 18, int(self.py) + 44)
 
     # ── Stage 2 draw ───────────────────────────────────────────────────────
     def draw_water(self):
@@ -625,7 +745,6 @@ class Game:
         screen.blit(water_surf, (0, H-60))
         pygame.draw.rect(screen, CYAN, (0, H-62, W, 4))
 
-        # Speed indicator
         spd  = font_xs.render(f"Speed: {self.car_speed:.1f}", True, WHITE)
         screen.blit(spd, (W-130, H-30))
         if self.car_speed < 0.5:
@@ -636,7 +755,6 @@ class Game:
             tip, tc = "Good speed!", GREEN
         screen.blit(font_xs.render(tip, True, tc), (W-180, H-50))
 
-        # Flip warning
         if self.flip_timer > 10:
             draw_text(screen, "Too steep! SLOW DOWN!", font_med, RED, W//2, 60, shadow=True)
 
@@ -654,7 +772,6 @@ class Game:
         pygame.draw.circle(screen, YELLOW, (680, 60), 44)
         for c in self.clouds: c.draw(screen)
 
-        # Ground strip
         pygame.draw.rect(screen, DKGREEN, (0, H-55, W, 55))
         pygame.draw.rect(screen, GREEN,   (0, H-55, W, 10))
         for i in range(0, W+80, 80):
@@ -672,32 +789,55 @@ class Game:
             pygame.draw.rect(screen, DKGREEN,     (cx-30, 0, 60, o["gap_top"]), 2)
             pygame.draw.rect(screen, GREEN,       (cx-36, o["gap_top"], 72, 16), border_radius=4)
 
-        draw_plane(screen, int(self.px), int(self.py))
+        # Draw custom plane image centred on player position
+        img = self.plane_img
+        iw, ih = img.get_size()
+        screen.blit(img, (int(self.px) - iw // 2, int(self.py) - ih // 2))
         draw_text(screen, f"Pipes: {self.pipes_passed}/{PIPE_GOAL}", font_sm, WHITE, W-90, 22, shadow=True)
 
     # ── HUD ────────────────────────────────────────────────────────────────
     def draw_hud(self):
-        bar = pygame.Surface((240, 44), pygame.SRCALPHA)
-        bar.fill((0, 0, 0, 140))
-        screen.blit(bar, (8, 8))
-
         t = STAGES[self.stage_idx]["type"]
+
         if t == "run":
-            prog = min(1.0, self.coins_collected / COIN_GOAL)
-            draw_text(screen, f"Coins: {self.coins_collected}/{COIN_GOAL}", font_sm, GOLD, 130, 22)
-        elif t == "water":
-            prog = min(1.0, self.score / WATER_GOAL)
-            draw_text(screen, f"Score: {int(self.score)}/{WATER_GOAL}", font_sm, WHITE, 130, 22)
-        elif t == "car":
-            prog = min(1.0, self.terrain_offset / CAR_GOAL)
-            draw_text(screen, f"Dist: {int(self.terrain_offset)}/{CAR_GOAL}", font_sm, WHITE, 130, 22)
-        elif t == "fly":
-            prog = min(1.0, self.pipes_passed / PIPE_GOAL)
+            # Wider HUD panel for two-route quota display
+            bar = pygame.Surface((300, 80), pygame.SRCALPHA)
+            bar.fill((0, 0, 0, 150))
+            screen.blit(bar, (8, 8))
 
-        pygame.draw.rect(screen, DKGRAY, (8, 54, 240, 10), border_radius=5)
-        pygame.draw.rect(screen, GOLD,   (8, 54, int(240*prog), 10), border_radius=5)
+            # Top-route quota
+            top_done = self.top_coins_collected >= TOP_COIN_QUOTA
+            top_col  = GREEN if top_done else GOLD
+            draw_text(screen, f"▲ Top:    {self.top_coins_collected}/{TOP_COIN_QUOTA}", font_sm, top_col, 110, 24)
 
-        draw_text(screen, f"Stage {self.stage_idx+1}/4", font_xs, YELLOW, 26, 68)
+            # Bottom-route quota
+            bot_done = self.bottom_coins_collected >= BOTTOM_COIN_QUOTA
+            bot_col  = GREEN if bot_done else PINK
+            draw_text(screen, f"▼ Bottom: {self.bottom_coins_collected}/{BOTTOM_COIN_QUOTA}", font_sm, bot_col, 110, 46)
+
+            # Progress bar = overall fraction
+            prog = min(1.0, (self.top_coins_collected + self.bottom_coins_collected) / COIN_GOAL)
+            pygame.draw.rect(screen, DKGRAY, (8, 64, 300, 10), border_radius=5)
+            pygame.draw.rect(screen, GOLD,   (8, 64, int(300*prog), 10), border_radius=5)
+
+        else:
+            bar = pygame.Surface((240, 44), pygame.SRCALPHA)
+            bar.fill((0, 0, 0, 140))
+            screen.blit(bar, (8, 8))
+
+            if t == "water":
+                prog = min(1.0, self.score / WATER_GOAL)
+                draw_text(screen, f"Score: {int(self.score)}/{WATER_GOAL}", font_sm, WHITE, 130, 22)
+            elif t == "car":
+                prog = min(1.0, self.terrain_offset / CAR_GOAL)
+                draw_text(screen, f"Dist: {int(self.terrain_offset)}/{CAR_GOAL}", font_sm, WHITE, 130, 22)
+            elif t == "fly":
+                prog = min(1.0, self.pipes_passed / PIPE_GOAL)
+
+            pygame.draw.rect(screen, DKGRAY, (8, 54, 240, 10), border_radius=5)
+            pygame.draw.rect(screen, GOLD,   (8, 54, int(240*prog), 10), border_radius=5)
+
+        draw_text(screen, f"Stage {self.stage_idx+1}/4", font_xs, YELLOW, 26, 76 if t == "run" else 68)
         draw_text(screen, STAGES[self.stage_idx]["name"], font_xs, WHITE,    W//2, 14, shadow=True)
         draw_text(screen, STAGES[self.stage_idx]["desc"], font_xs, OFFWHITE, W//2, 30)
 
